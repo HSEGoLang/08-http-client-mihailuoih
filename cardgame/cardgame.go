@@ -1,97 +1,80 @@
-//go:build !solution
-
-package cardgame
+package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"os"
 )
 
-const defaultBaseURL = "https://deckofcardsapi.com/api/deck"
-
-// Client представляет клиента для работы с API карточной колоды
-type Client struct {
-	baseURL string
-	client  *http.Client
-	output  io.Writer
+type drawResp struct {
+	Success bool   `json:"success"`
+	DeckID  string `json:"deck_id"`
+	Cards   []struct {
+		Value string `json:"value"`
+	} `json:"cards"`
+	Remaining int `json:"remaining"`
 }
 
-// NewClient создаёт новый клиент с настройками по умолчанию
-func NewClient() *Client {
-	return &Client{
-		baseURL: defaultBaseURL,
-		client:  http.DefaultClient,
-		output:  nil, // nil означает вывод в stdout через fmt
-	}
-}
+func main() {
+	// Тут я юзаю json.NewDecoder(resp.Body).Decode(...). Почему? NewDecoder(resp.Body) сразу
+	// создаёт декодер на основе буффера, и декод матчит респонз в структуру. Для анмаршалла нужен промежуточный буффер:
+	// https://pkg.go.dev/encoding/json#Decoder.Decode
+	// https://pkg.go.dev/encoding/json#Decoder
 
-// PlayGame запускает игру "угадай карту до дамы"
-// userGuess - количество карт, которое, по мнению пользователя, нужно снять
-// Возвращает true, если пользователь угадал, false если нет
-// В этом коде есть ОШИБКИ! Найди и исправь их.
-func (c *Client) PlayGame(userGuess int) (bool, error) {
-	// Создаём и перетасовываем колоду
-	resp, err := c.client.Get(c.baseURL + "/new/shuffle/?deck_count=1")
+	in := bufio.NewReader(os.Stdin)
+	var guess int
+	fmt.Print("Введите позицию (1..52): ")
+	_, err := fmt.Fscan(in, &guess)
+
+	resp, err := http.Get("https://deckofcardsapi.com/api/deck/new/shuffle/?deck_count=1")
 	if err != nil {
-		return false, fmt.Errorf("failed to create deck: %w", err)
+		fmt.Println("net err:", err)
+		return
 	}
 	defer resp.Body.Close()
 
-	var deckResp DeckResponse
-	if err := json.NewDecoder(resp.Body).Decode(&deckResp); err != nil {
-		return false, fmt.Errorf("failed to decode deck response: %w", err)
+	var first drawResp
+	if err := json.NewDecoder(resp.Body).Decode(&first); err != nil || !first.Success {
+		fmt.Println("api err: shuffle")
+		return
+	}
+	deckID := first.DeckID
+
+	var queens []int
+	for i := 1; i <= 52; i++ {
+		url := "https://deckofcardsapi.com/api/deck/" + deckID + "/draw/?count=1"
+		r, err := http.Get(url)
+		if err != nil {
+			fmt.Println("net err:", err)
+			return
+		}
+		var d drawResp
+		if err := json.NewDecoder(r.Body).Decode(&d); err != nil || !d.Success || len(d.Cards) != 1 {
+			r.Body.Close()
+			fmt.Println("api err: draw")
+			return
+		}
+		fmt.Print(d)
+		r.Body.Close()
+		if d.Cards[0].Value == "QUEEN" {
+			queens = append(queens, i)
+		}
 	}
 
-	deckID := deckResp.DeckID
-	realCount := 0
-
-	// Вытягиваем карты, пока не найдём даму
-	for {
-		// ОШИБКА 1: запрашиваем неправильное количество карт
-		drawResp, err := c.client.Get(fmt.Sprintf("%s/%s/draw/?count=2", c.baseURL, deckID))
-		if err != nil {
-			return false, fmt.Errorf("failed to draw card: %w", err)
-		}
-		defer drawResp.Body.Close()
-
-		var draw DrawResponse
-		if err := json.NewDecoder(drawResp.Body).Decode(&draw); err != nil {
-			return false, fmt.Errorf("failed to decode draw response: %w", err)
-		}
-
-		// ОШИБКА 2: неправильно работаем с массивом cards
-		card := draw.Cards
-		realCount++
-
-		// ОШИБКА 3: неправильный доступ к полям карты
-		c.printf("%s of %s\n", card[0].Value, card[0].Suit)
-
-		if card[0].Value == "QUEEN" {
+	hit := false
+	for _, q := range queens {
+		if q == guess {
+			hit = true
 			break
 		}
 	}
 
-	// Проверяем результат
-	if realCount == userGuess {
-		c.printf("Вы угадали!\n")
-		return true, nil
+	if hit {
+		fmt.Printf("ДА! На позиции %d — Дама.\n", guess)
 	} else {
-		c.printf("Вы проиграли! Правильный ответ: %d\n", realCount)
-		return false, nil
+		fmt.Printf("Нет. На позиции %d Дамы нет.\n", guess)
 	}
-}
-
-func (c *Client) printf(format string, args ...interface{}) {
-	if c.output != nil {
-		fmt.Fprintf(c.output, format, args...)
-	} else {
-		fmt.Printf(format, args...)
-	}
-}
-
-// PlayGame - вспомогательная функция для обратной совместимости
-func PlayGame(userGuess int) (bool, error) {
-	return NewClient().PlayGame(userGuess)
+	fmt.Printf("Позиции Дам: %v\n", queens)
 }
